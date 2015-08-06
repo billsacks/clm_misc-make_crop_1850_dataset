@@ -12,31 +12,35 @@ from __future__ import division
 
 from netCDF4 import Dataset
 import numpy
+import subprocess
 
 # ------------------------------------------------------------------------
 # Define functions
 # ------------------------------------------------------------------------
 
-def create_1850_dataset(noncrop1850, crop1850_pctpft, crop1850_file):
+def create_1850_dataset(crop1850_pctpft, noncrop1850_filename, crop1850_filename):
     """Create the year-1850 crop raw dataset.
 
-    noncrop1850: netCDF4 Dataset containing non-crop 1850 raw data
     crop1850_pctpft: 3d numpy array containing pctpft for crop 1850
-    crop1850_file: string giving file name for output file
+    noncrop1850_filename: string giving file name for non-crop 1850 file
+    crop1850_filename: string giving file name for output file
     """
-    
-    crop1850 = Dataset(crop1850_file, "w")
 
-    for dname, the_dim in noncrop1850.dimensions.iteritems():
-        if (dname /= 'pft'):
-            dlen = len(the_dim)
-            crop1850.createDimension(dname, dlen)
+    # A bit of a kludge to get a starting file without PCT_PFT (because I can't
+    # see a way to change a dimension size in an existing Dataset)
+    subprocess.check_call(['ncks', '-x', '-v', 'PCT_PFT', noncrop1850_filename, crop1850_filename])
+    crop1850 = Dataset(crop1850_filename, "a")
+
     crop1850.createDimension('pft', crop1850_pctpft.shape[0])
             
-    for vname, the_var in noncrop1850.variables.iteritems():
-        if (vname /= 'PCT_PFT'):
-            
+    pct_pft = crop1850.createVariable(
+        'PCT_PFT', 'f4', ('pft', 'lat', 'lon'), fill_value=-999)
+    pct_pft.setncattr('long_name', 'percent pft')
+    pct_pft[:] = crop1850_pctpft
+    
+    crop1850.close()
 
+    
 # ------------------------------------------------------------------------
 # Set parameters
 # ------------------------------------------------------------------------
@@ -163,7 +167,4 @@ if (numpy.any(
 # Create output file
 # ------------------------------------------------------------------------
 
-
-crop1850 = noncrop1850
-
-### crop1850.variables['PCT_PFT'][firstcrop:,:,:] = crop1850_pctcft
+create_1850_dataset(crop1850_pctpft, noncrop1850_file, crop1850_file)
