@@ -9,13 +9,57 @@
 # generic crop.
 
 from __future__ import division
+from __future__ import print_function
 
-from netCDF4 import Dataset
+import sys
+
+if sys.hexversion < 0x02070000:
+    print(70 * "*")
+    print("ERROR: {0} requires python >= 2.7.x. ".format(sys.argv[0]))
+    print("It appears that you are running python {0}".format(
+        ".".join(str(x) for x in sys.version_info[0:3])))
+    print(70 * "*")
+    sys.exit(1)
+
+#
+# built-in modules
+#
 import numpy
 import subprocess
+import argparse
+
+#
+# installed dependencies
+#
+from netCDF4 import Dataset
 
 # ------------------------------------------------------------------------
-# Define functions
+# user input
+# ------------------------------------------------------------------------
+
+def commandline_options():
+    """Process the command line arguments."""
+
+    parser = argparse.ArgumentParser(
+        description = "Creates a year-1850 raw PFT dataset with breakdown into prognostic crop types.")
+
+    parser.add_argument('--crop2000', required=True, dest="crop2000_file",
+                        help="Path to existing year-2000 crop raw dataset (input)")
+
+    parser.add_argument('--noncrop1850', required=True, dest="noncrop1850_file",
+                        help="Path to existing year-1850 non-crop raw dataset (input)")
+
+    parser.add_argument('--crop1850', required=True, dest="crop1850_file",
+                        help="Path to new year-1850 crop raw dataset (output)")
+
+    parser.add_argument('--backtrace', action='store_true',
+                        help='show exception backtraces as extra debugging output')
+
+    options = parser.parse_args()
+    return options
+
+# ------------------------------------------------------------------------
+# work functions
 # ------------------------------------------------------------------------
 
 def create_1850_dataset(crop1850_pctpft, noncrop1850_filename, crop1850_filename):
@@ -40,131 +84,147 @@ def create_1850_dataset(crop1850_pctpft, noncrop1850_filename, crop1850_filename
     
     crop1850.close()
 
+
+# -------------------------------------------------------------------------------
+#
+# main
+#
+# -------------------------------------------------------------------------------
+
+def main(options):
+
+
+    # ------------------------------------------------------------------------
+    # Set parameters
+    # ------------------------------------------------------------------------
+
+    # Index of first CFT in the PFT array
+    firstcrop = 15
+
+    # Tolerance for error checks
+    # pretty loose tolerance since data in files are single precision
+    tol = 1e-4
+
+    # ------------------------------------------------------------------------
+    # Determine PCT_CFT for 1850
+    # ------------------------------------------------------------------------
+
+    # Read in data
+    crop2000 = Dataset(options.crop2000_file)
+    crop2000_pctcft = crop2000.variables['PCT_PFT'][firstcrop:,:,:]
+    noncrop1850 = Dataset(options.noncrop1850_file)
+    noncrop1850_pctcft = noncrop1850.variables['PCT_PFT'][firstcrop:,:,:]
+
+    # Determine total crop cover in each grid cell in both datasets
+    crop2000_totcrop = numpy.sum(crop2000_pctcft, axis=0)
+    noncrop1850_totcrop = numpy.sum(noncrop1850_pctcft, axis=0)
+
+    # Determine which grid cells do and do not have information about break-down into CFTs
+    crop2000_gridcells_with_crop = (crop2000_totcrop > 0)
+    crop2000_gridcells_with_no_crop = numpy.logical_not(crop2000_gridcells_with_crop)
+
+    # For grid cells with crop: Determine year-1850 CFT percentages by scaling the
+    # year-2000 CFT percentages so that the year-1850 total matches the total from
+    # the non-crop dataset.
+    crop1850_pctcft = numpy.zeros(crop2000_pctcft.shape)
+    num_cfts = crop1850_pctcft.shape[0]
+    for cft in range(num_cfts):
+        crop1850_pctcft[cft, crop2000_gridcells_with_crop] = \
+          crop2000_pctcft[cft, crop2000_gridcells_with_crop] * \
+          (noncrop1850_totcrop[crop2000_gridcells_with_crop] / \
+           crop2000_totcrop[crop2000_gridcells_with_crop])
+
+    # Where year-2000 crop dataset had no crop, we had no information on crop
+    # breakdown, and divided by 0. Fix that by putting all crop in the generic crop
+    # types.
+    noncrop_num_cfts = noncrop1850_pctcft.shape[0]
+    for cft in range(noncrop_num_cfts):
+        crop1850_pctcft[cft, crop2000_gridcells_with_no_crop] = \
+          noncrop1850_pctcft[cft, crop2000_gridcells_with_no_crop]
+
+    for cft in range(noncrop_num_cfts, num_cfts):
+        crop1850_pctcft[cft, crop2000_gridcells_with_no_crop] = 0
+
+
+    # Check: shouldn't have any nan values
+    if (numpy.any(numpy.isnan(crop1850_pctcft))):    
+        raise ValueError('NaNs remain in crop1850_pctcft')
+
+    # ------------------------------------------------------------------------
+    # Make full 1850 PCTPFT
+    # ------------------------------------------------------------------------
+
+    crop1850_pctpft = numpy.zeros(crop2000.variables['PCT_PFT'][:].shape)
+
+    # Natural PFTs come from non-crop 1850
+    crop1850_pctpft[:firstcrop,:,:] = noncrop1850.variables['PCT_PFT'][:firstcrop,:,:]
+
+    # CFTs come from the values we determined above
+    crop1850_pctpft[firstcrop:,:,:] = crop1850_pctcft
+
+    # ------------------------------------------------------------------------
+    # Do some sanity checks
+    # ------------------------------------------------------------------------
+
+    if (numpy.any(crop1850_pctpft[:firstcrop,:,:] !=
+                  noncrop1850.variables['PCT_PFT'][:firstcrop,:,:])):
+        raise RuntimeError('crop 1850 natveg distribution should match noncrop 1850 natveg distribution')
+
+    crop1850_tot = numpy.sum(crop1850_pctpft, axis=0)
+    if (numpy.any(
+        numpy.logical_and(
+            (crop1850_tot > 0),
+            (abs(crop1850_tot - 100) > tol)))):
+        raise RuntimeError('total of PCT_PFT should be 100% for all grid cells')
+
+    crop1850_totcrop = numpy.sum(crop1850_pctpft[firstcrop:,:,:], axis=0)
+    if (numpy.any(abs(crop1850_totcrop - noncrop1850_totcrop) > tol)):
+        raise RuntimeError('total crop in 1850 should match total from non-crop 1850 dataset')
+
+    gridcells_with_crop_in_1850_and_2000 = numpy.logical_and(
+        (crop1850_totcrop > 0), (crop2000_totcrop > 0))
+    cft_fractions_1850 = \
+      crop1850_pctpft[firstcrop:, gridcells_with_crop_in_1850_and_2000] / \
+      crop1850_totcrop[gridcells_with_crop_in_1850_and_2000]
+    cft_fractions_2000 = \
+      crop2000_pctcft[:, gridcells_with_crop_in_1850_and_2000] / \
+      crop2000_totcrop[gridcells_with_crop_in_1850_and_2000]
+    if (numpy.any(abs(cft_fractions_1850 - cft_fractions_2000) > tol)):
+        raise RuntimeError('For grid cells where there is crop in 1850 and crop in 2000, '
+                           'CFT fractions in 1850 should match CFT fractions in 2000.')
+
+    gridcells_with_crop_in_1850_but_not_2000 = numpy.logical_and(
+        (crop1850_totcrop > 0), (crop2000_totcrop == 0))
+    # In the following, we check pctpft directly, rather than pctpft / totcrop,
+    # since totcrop matches in crop1850 vs noncrop1850 (as confirmed above)
+    if (numpy.any(abs(
+        crop1850_pctpft[firstcrop:(firstcrop+noncrop_num_cfts), gridcells_with_crop_in_1850_but_not_2000] - \
+        noncrop1850_pctcft[:, gridcells_with_crop_in_1850_but_not_2000]) > tol)):
+        raise RuntimeError('For grid cells where there is crop in 1850 but no crop in 2000, '
+                           'CFT in 1850 should match non-crop CFT in 1850')
+
+    if (numpy.any(
+        crop1850_pctpft[(firstcrop+noncrop_num_cfts):,
+        gridcells_with_crop_in_1850_but_not_2000] > 0)):
+        raise RuntimeError('For grid cells where there is crop in 1850 but no crop in 2000, '
+                           'CFT should be 0 for non-generic CFTs')
+
+    # ------------------------------------------------------------------------
+    # Create output file
+    # ------------------------------------------------------------------------
+
+    create_1850_dataset(crop1850_pctpft, options.noncrop1850_file, options.crop1850_file)
+
+    return 0
     
-# ------------------------------------------------------------------------
-# Set parameters
-# ------------------------------------------------------------------------
+if __name__ == "__main__":
+    options = commandline_options()
+    try:
+        status = main(options)
+        sys.exit(status)
+    except Exception as error:
+        print(str(error))
+        if options.backtrace:
+            traceback.print_exc()
+        sys.exit(1)
 
-# Input files
-crop2000_file = 'mksrf_78pft_harvest_landuse_rc2000_c150203.nc'
-noncrop1850_file = 'mksrf_landuse_rc1850_c090630.nc'
-
-# Output file
-crop1850_file = 'mksrf_78pft_harvest_landuse_rc1850_c150806.nc'
-
-# Index of first CFT in the PFT array
-firstcrop = 15
-
-# Tolerance for error checks
-# pretty loose tolerance since data in files are single precision
-tol = 1e-4
-
-# ------------------------------------------------------------------------
-# Determine PCT_CFT for 1850
-# ------------------------------------------------------------------------
-
-# Read in data
-crop2000 = Dataset(crop2000_file)
-crop2000_pctcft = crop2000.variables['PCT_PFT'][firstcrop:,:,:]
-noncrop1850 = Dataset(noncrop1850_file)
-noncrop1850_pctcft = noncrop1850.variables['PCT_PFT'][firstcrop:,:,:]
-
-# Determine total crop cover in each grid cell in both datasets
-crop2000_totcrop = numpy.sum(crop2000_pctcft, axis=0)
-noncrop1850_totcrop = numpy.sum(noncrop1850_pctcft, axis=0)
-
-# Determine which grid cells do and do not have information about break-down into CFTs
-crop2000_gridcells_with_crop = (crop2000_totcrop > 0)
-crop2000_gridcells_with_no_crop = numpy.logical_not(crop2000_gridcells_with_crop)
-
-# For grid cells with crop: Determine year-1850 CFT percentages by scaling the
-# year-2000 CFT percentages so that the year-1850 total matches the total from
-# the non-crop dataset.
-crop1850_pctcft = numpy.zeros(crop2000_pctcft.shape)
-num_cfts = crop1850_pctcft.shape[0]
-for cft in range(num_cfts):
-    crop1850_pctcft[cft, crop2000_gridcells_with_crop] = \
-      crop2000_pctcft[cft, crop2000_gridcells_with_crop] * \
-      (noncrop1850_totcrop[crop2000_gridcells_with_crop] / \
-       crop2000_totcrop[crop2000_gridcells_with_crop])
-
-# Where year-2000 crop dataset had no crop, we had no information on crop
-# breakdown, and divided by 0. Fix that by putting all crop in the generic crop
-# types.
-noncrop_num_cfts = noncrop1850_pctcft.shape[0]
-for cft in range(noncrop_num_cfts):
-    crop1850_pctcft[cft, crop2000_gridcells_with_no_crop] = \
-      noncrop1850_pctcft[cft, crop2000_gridcells_with_no_crop]
-
-for cft in range(noncrop_num_cfts, num_cfts):
-    crop1850_pctcft[cft, crop2000_gridcells_with_no_crop] = 0
-
-
-# Check: shouldn't have any nan values
-if (numpy.any(numpy.isnan(crop1850_pctcft))):    
-    raise ValueError('NaNs remain in crop1850_pctcft')
-
-# ------------------------------------------------------------------------
-# Make full 1850 PCTPFT
-# ------------------------------------------------------------------------
-
-crop1850_pctpft = numpy.zeros(crop2000.variables['PCT_PFT'][:].shape)
-
-# Natural PFTs come from non-crop 1850
-crop1850_pctpft[:firstcrop,:,:] = noncrop1850.variables['PCT_PFT'][:firstcrop,:,:]
-
-# CFTs come from the values we determined above
-crop1850_pctpft[firstcrop:,:,:] = crop1850_pctcft
-
-# ------------------------------------------------------------------------
-# Do some sanity checks
-# ------------------------------------------------------------------------
-
-if (numpy.any(crop1850_pctpft[:firstcrop,:,:] !=
-              noncrop1850.variables['PCT_PFT'][:firstcrop,:,:])):
-    raise RuntimeError('crop 1850 natveg distribution should match noncrop 1850 natveg distribution')
-
-crop1850_tot = numpy.sum(crop1850_pctpft, axis=0)
-if (numpy.any(
-    numpy.logical_and(
-        (crop1850_tot > 0),
-        (abs(crop1850_tot - 100) > tol)))):
-    raise RuntimeError('total of PCT_PFT should be 100% for all grid cells')
-      
-crop1850_totcrop = numpy.sum(crop1850_pctpft[firstcrop:,:,:], axis=0)
-if (numpy.any(abs(crop1850_totcrop - noncrop1850_totcrop) > tol)):
-    raise RuntimeError('total crop in 1850 should match total from non-crop 1850 dataset')
-
-gridcells_with_crop_in_1850_and_2000 = numpy.logical_and(
-    (crop1850_totcrop > 0), (crop2000_totcrop > 0))
-cft_fractions_1850 = \
-  crop1850_pctpft[firstcrop:, gridcells_with_crop_in_1850_and_2000] / \
-  crop1850_totcrop[gridcells_with_crop_in_1850_and_2000]
-cft_fractions_2000 = \
-  crop2000_pctcft[:, gridcells_with_crop_in_1850_and_2000] / \
-  crop2000_totcrop[gridcells_with_crop_in_1850_and_2000]
-if (numpy.any(abs(cft_fractions_1850 - cft_fractions_2000) > tol)):
-    raise RuntimeError('For grid cells where there is crop in 1850 and crop in 2000, '
-                       'CFT fractions in 1850 should match CFT fractions in 2000.')
-
-gridcells_with_crop_in_1850_but_not_2000 = numpy.logical_and(
-    (crop1850_totcrop > 0), (crop2000_totcrop == 0))
-# In the following, we check pctpft directly, rather than pctpft / totcrop,
-# since totcrop matches in crop1850 vs noncrop1850 (as confirmed above)
-if (numpy.any(abs(
-    crop1850_pctpft[firstcrop:(firstcrop+noncrop_num_cfts), gridcells_with_crop_in_1850_but_not_2000] - \
-    noncrop1850_pctcft[:, gridcells_with_crop_in_1850_but_not_2000]) > tol)):
-    raise RuntimeError('For grid cells where there is crop in 1850 but no crop in 2000, '
-                       'CFT in 1850 should match non-crop CFT in 1850')
-
-if (numpy.any(
-    crop1850_pctpft[(firstcrop+noncrop_num_cfts):,
-    gridcells_with_crop_in_1850_but_not_2000] > 0)):
-    raise RuntimeError('For grid cells where there is crop in 1850 but no crop in 2000, '
-                       'CFT should be 0 for non-generic CFTs')
-
-# ------------------------------------------------------------------------
-# Create output file
-# ------------------------------------------------------------------------
-
-create_1850_dataset(crop1850_pctpft, noncrop1850_file, crop1850_file)
