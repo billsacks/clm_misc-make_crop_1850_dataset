@@ -147,8 +147,7 @@ class PctPft:
     def total_crop(self):
         """Returns an array containing the total crop fraction for each grid cell."""
 
-        pct_cft = self.pct_pft_data[self._FIRSTCROP:,:,:]
-        return numpy.sum(pct_cft, axis=0)
+        return numpy.sum(self.pct_cft(), axis=0)
 
         
 # ------------------------------------------------------------------------
@@ -180,60 +179,16 @@ def commandline_options():
 # work functions
 # ------------------------------------------------------------------------
 
-def create_1850_dataset(crop1850_pctpft, noncrop1850_filename, crop1850_filename):
-    """Create the year-1850 crop raw dataset.
+def sanity_checks(crop1850, noncrop1850, crop2000):
+    """Do sanity checks on crop1850 data, given noncrop1850 and crop2000 data.
 
-    crop1850_pctpft: PctPft object containing data for crop 1850
-    noncrop1850_filename: string giving file name for non-crop 1850 file
-    crop1850_filename: string giving file name for output file
+    All arguments are PctPft objects.
     """
-
-    # A bit of a kludge to get a starting file without PCT_PFT (because I can't
-    # see a way to change a dimension size in an existing Dataset)
-    subprocess.check_call(['ncks', '-x', '-v', 'PCT_PFT', noncrop1850_filename, crop1850_filename])
-    crop1850 = Dataset(crop1850_filename, "a")
-
-    crop1850.createDimension('pft', crop1850_pctpft.num_pfts())
-            
-    pct_pft = crop1850.createVariable(
-        'PCT_PFT', 'f4', ('pft', 'lat', 'lon'), fill_value=-999)
-    pct_pft.setncattr('long_name', 'percent pft')
-    pct_pft[:] = crop1850_pctpft.pct_pft_data
-    
-    crop1850.close()
-
-
-# -------------------------------------------------------------------------------
-#
-# main
-#
-# -------------------------------------------------------------------------------
-
-def main(options):
-
-
-    # ------------------------------------------------------------------------
-    # Set parameters
-    # ------------------------------------------------------------------------
 
     # Tolerance for error checks
     # pretty loose tolerance since data in files are single precision
     tol = 1e-4
 
-    # ------------------------------------------------------------------------
-    # Determine PCT_CFT for 1850
-    # ------------------------------------------------------------------------
-
-    # Read in data
-    crop2000 = PctPft.pct_pft_from_file(options.crop2000_file)
-    noncrop1850 = PctPft.pct_pft_from_file(options.noncrop1850_file)
-
-    # Make 1850 pctpft
-    crop1850 = PctPft.pct_pft_crop1850_from_crop2000_and_noncrop1850(crop2000, noncrop1850)
-
-    # ------------------------------------------------------------------------
-    # Do some sanity checks
-    # ------------------------------------------------------------------------
 
     if (numpy.any(crop1850.pct_nat_pft() != noncrop1850.pct_nat_pft())):
         raise RuntimeError('crop 1850 natveg distribution should match noncrop 1850 natveg distribution')
@@ -269,14 +224,53 @@ def main(options):
         raise RuntimeError('For grid cells where there is crop in 1850 but no crop in 2000, '
                            'CFT should be 0 for non-generic CFTs')
 
-    # ------------------------------------------------------------------------
-    # Create output file
-    # ------------------------------------------------------------------------
+        
+
+def create_1850_dataset(crop1850_pctpft, noncrop1850_filename, crop1850_filename):
+    """Create the year-1850 crop raw dataset.
+
+    crop1850_pctpft: PctPft object containing data for crop 1850
+    noncrop1850_filename: string giving file name for non-crop 1850 file
+    crop1850_filename: string giving file name for output file
+    """
+
+    # A bit of a kludge to get a starting file without PCT_PFT (because I can't
+    # see a way to change a dimension size in an existing Dataset)
+    subprocess.check_call(['ncks', '-x', '-v', 'PCT_PFT', noncrop1850_filename, crop1850_filename])
+    crop1850 = Dataset(crop1850_filename, "a")
+
+    crop1850.createDimension('pft', crop1850_pctpft.num_pfts())
+            
+    pct_pft = crop1850.createVariable(
+        'PCT_PFT', 'f4', ('pft', 'lat', 'lon'), fill_value=-999)
+    pct_pft.setncattr('long_name', 'percent pft')
+    pct_pft[:] = crop1850_pctpft.pct_pft_data
+    
+    crop1850.close()
+
+
+# -------------------------------------------------------------------------------
+#
+# main
+#
+# -------------------------------------------------------------------------------
+
+def main(options):
+
+    # Read in data
+    crop2000 = PctPft.pct_pft_from_file(options.crop2000_file)
+    noncrop1850 = PctPft.pct_pft_from_file(options.noncrop1850_file)
+
+    # Make 1850 pctpft
+    crop1850 = PctPft.pct_pft_crop1850_from_crop2000_and_noncrop1850(crop2000, noncrop1850)
+
+    sanity_checks(crop1850, noncrop1850, crop2000)
 
     create_1850_dataset(crop1850, options.noncrop1850_file, options.crop1850_file)
 
     return 0
     
+
 if __name__ == "__main__":
     options = commandline_options()
     try:
